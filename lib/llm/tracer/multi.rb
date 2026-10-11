@@ -202,6 +202,5 @@ class LLM::Tracer
     def each_tracer
       @tracers.each { |tracer| yield tracer }
     end
-
   end
 end
