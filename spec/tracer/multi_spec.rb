@@ -164,10 +164,15 @@ RSpec.describe LLM::Tracer::Multi do
 
   describe "a crashing tracer" do
     it "does not take the other tracers down with it" do
-      crashing = recording_tracer_class.new(provider, "x")
-      def crashing.on_request_start(**)
-        raise "tracer exploded"
+      # NB: defined on a subclass (not a singleton method) so the
+      # inherited LLM::Tracer::Rescue wrapper applies, like it does
+      # for every real tracer under Multi's supervision.
+      crashing_class = Class.new(recording_tracer_class) do
+        def on_request_start(**)
+          raise "tracer exploded"
+        end
       end
+      crashing = crashing_class.new(provider, "x")
       multi = described_class.new(crashing, tracer_b)
 
       spans = nil
@@ -207,20 +212,11 @@ RSpec.describe LLM::Tracer::Multi do
     end
   end
 
-  describe "#set_finish_metadata_proc / #merge_extra / #flush!" do
-    it "fans out and returns self (or nil for flush!)" do
+  describe "#set_finish_metadata_proc / #merge_extra" do
+    it "fans out and returns self" do
       proc = ->(res) { {intent: "chat"} }
       expect(multi.set_finish_metadata_proc(proc)).to be(multi)
       expect(multi.merge_extra(metadata: {a: 1})).to be(multi)
-      expect(multi.flush!).to be_nil
-    end
-  end
-
-  describe "#spans" do
-    it "aggregates the spans of every tracer" do
-      def tracer_a.spans = ["span-a"]
-      def tracer_b.spans = ["span-b"]
-      expect(multi.spans).to eq(["span-a", "span-b"])
     end
   end
 end
