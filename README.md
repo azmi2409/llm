@@ -720,6 +720,9 @@ factory method:
 exports spans via OTLP for OpenTelemetry in production.
 * [`LLM::Tracer.logger`](https://r.uby.dev/api-docs/llm.rb/LLM/Tracer.html#logger-class_method):
 structured JSON to stdout or a file.
+* [`LLM::Tracer::Multi`](https://r.uby.dev/api-docs/llm.rb/LLM/Tracer/Multi.html):
+fans out every callback to a set of tracers, so a request can be
+logged and exported at the same time.
 
 It is also possible to create your own tracer by creating a subclass
 of [`LLM::Tracer`](https://r.uby.dev/api-docs/llm.rb/LLM/Tracer.html)

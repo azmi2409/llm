@@ -24,6 +24,7 @@ module LLM
     require_relative "tracer/telemetry"
     require_relative "tracer/null"
     require_relative "tracer/pretty_logger"
+    require_relative "tracer/multi"
 
     ##
     # Returns the registry that counts the open scopes for each tracer.

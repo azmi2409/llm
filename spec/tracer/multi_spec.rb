@@ -1,0 +1,226 @@
+# frozen_string_literal: true
+
+require "setup"
+
+RSpec.describe LLM::Tracer::Multi do
+  let(:provider) { LLM.openai(key: "test") }
+  let(:request_id) { SecureRandom.uuid_v7 }
+
+  # A tracer that records every callback it receives and answers
+  # start callbacks with a sentinel span.
+  let(:recording_tracer_class) do
+    Class.new(LLM::Tracer::Null) do
+      attr_reader :calls
+
+      def initialize(provider, span_prefix)
+        super(provider)
+        @span_prefix = span_prefix
+        @calls = []
+      end
+
+      def on_request_start(operation:, model: nil, inputs: nil, request_id:)
+        @calls << [:on_request_start, {operation:, model:, inputs:, request_id:}]
+        "#{@span_prefix}:request"
+      end
+
+      def on_request_finish(operation:, res:, model: nil, span: nil, outputs: nil, metadata: nil, request_id:)
+        @calls << [:on_request_finish, {operation:, model:, span:, outputs:, metadata:, request_id:}]
+        nil
+      end
+
+      def on_request_error(ex:, span:, request_id:)
+        @calls << [:on_request_error, {ex:, span:, request_id:}]
+        nil
+      end
+
+      def on_tool_start(id:, name:, arguments:, model:)
+        @calls << [:on_tool_start, {id:, name:, arguments:, model:}]
+        "#{@span_prefix}:tool"
+      end
+
+      def on_tool_interrupt(ex:, span:)
+        @calls << [:on_tool_interrupt, {ex:, span:}]
+        nil
+      end
+
+      def on_tool_finish(result:, span:)
+        @calls << [:on_tool_finish, {result:, span:}]
+        nil
+      end
+
+      def on_tool_error(ex:, span:)
+        @calls << [:on_tool_error, {ex:, span:}]
+        nil
+      end
+
+      def on_interrupt(scope:, span: nil, request_id: nil)
+        @calls << [:on_interrupt, {scope:, span:, request_id:}]
+        nil
+      end
+
+      def on_exit
+        @calls << [:on_exit, {}]
+        nil
+      end
+    end
+  end
+
+  let(:tracer_a) { recording_tracer_class.new(provider, "a") }
+  let(:tracer_b) { recording_tracer_class.new(provider, "b") }
+  let(:multi) { described_class.new(tracer_a, tracer_b) }
+
+  describe "#initialize" do
+    it "keeps the tracers" do
+      expect(multi.tracers).to eq([tracer_a, tracer_b])
+    end
+
+    it "borrows the provider from the first tracer" do
+      expect(multi.llm).to eq(provider)
+    end
+
+    it "works with no tracers" do
+      empty = described_class.new
+      expect(empty.tracers).to eq([])
+      expect {
+        empty.on_request_start(operation: "chat", request_id:)
+      }.not_to raise_error
+    end
+  end
+
+  describe "#on_request_start / #on_request_finish" do
+    let(:res) { double("LLM::Response") }
+
+    it "fans out and hands each tracer back its own span" do
+      spans = multi.on_request_start(operation: "chat", model: "gpt-4.1", request_id:)
+      expect(spans).to be_a(described_class::Spans)
+      expect(spans.for(tracer_a)).to eq("a:request")
+      expect(spans.for(tracer_b)).to eq("b:request")
+
+      multi.on_request_finish(operation: "chat", model: "gpt-4.1", res:, span: spans, request_id:)
+
+      finish_a = tracer_a.calls.find { |name,| name == :on_request_finish }
+      finish_b = tracer_b.calls.find { |name,| name == :on_request_finish }
+      expect(finish_a[1][:span]).to eq("a:request")
+      expect(finish_b[1][:span]).to eq("b:request")
+    end
+
+    it "fans out request errors with the matching span" do
+      spans = multi.on_request_start(operation: "chat", request_id:)
+      ex = RuntimeError.new("boom")
+      multi.on_request_error(ex:, span: spans, request_id:)
+
+      error_b = tracer_b.calls.find { |name,| name == :on_request_error }
+      expect(error_b[1][:ex]).to be(ex)
+      expect(error_b[1][:span]).to eq("b:request")
+    end
+  end
+
+  describe "#on_tool_start / #on_tool_finish" do
+    let(:result) { LLM::Function::Return.new("call_1", "tool", {ok: true}) }
+
+    it "fans out and hands each tracer back its own span" do
+      spans = multi.on_tool_start(id: "call_1", name: "tool", arguments: {q: 1}, model: "gpt-4.1")
+      expect(spans.for(tracer_a)).to eq("a:tool")
+      expect(spans.for(tracer_b)).to eq("b:tool")
+
+      multi.on_tool_finish(result:, span: spans)
+
+      finish_a = tracer_a.calls.find { |name,| name == :on_tool_finish }
+      expect(finish_a[1][:span]).to eq("a:tool")
+      expect(finish_a[1][:result]).to be(result)
+    end
+
+    it "fans out tool interrupts and tool errors with the matching span" do
+      spans = multi.on_tool_start(id: "call_1", name: "tool", arguments: {}, model: "gpt-4.1")
+      interrupt = LLM::Interrupt.new("stop")
+      ex = RuntimeError.new("boom")
+
+      expect { multi.on_tool_interrupt(ex: interrupt, span: spans) }.not_to raise_error
+      multi.on_tool_error(ex:, span: spans)
+
+      expect(tracer_a.calls.map(&:first)).to include(:on_tool_interrupt, :on_tool_error)
+      error_a = tracer_a.calls.find { |name,| name == :on_tool_error }
+      expect(error_a[1][:span]).to eq("a:tool")
+    end
+  end
+
+  describe "#on_interrupt" do
+    it "fans out with each tracer's own span" do
+      spans = multi.on_request_start(operation: "chat", request_id:)
+      multi.on_interrupt(scope: :request, span: spans, request_id:)
+
+      interrupt_b = tracer_b.calls.find { |name,| name == :on_interrupt }
+      expect(interrupt_b[1][:scope]).to eq(:request)
+      expect(interrupt_b[1][:span]).to eq("b:request")
+    end
+
+    it "fans out without a span" do
+      multi.on_interrupt(scope: :agent)
+      expect(tracer_a.calls.map(&:first)).to include(:on_interrupt)
+      interrupt_a = tracer_a.calls.find { |name,| name == :on_interrupt }
+      expect(interrupt_a[1][:span]).to be_nil
+    end
+  end
+
+  describe "a crashing tracer" do
+    it "does not take the other tracers down with it" do
+      crashing = recording_tracer_class.new(provider, "x")
+      def crashing.on_request_start(**)
+        raise "tracer exploded"
+      end
+      multi = described_class.new(crashing, tracer_b)
+
+      spans = nil
+      expect {
+        spans = multi.on_request_start(operation: "chat", request_id:)
+      }.not_to raise_error
+      expect(spans.for(crashing)).to be_nil
+      expect(spans.for(tracer_b)).to eq("b:request")
+      expect(tracer_b.calls.map(&:first)).to include(:on_request_start)
+    end
+
+    it "lets LLM::Interrupt travel up the stack" do
+      interrupting = recording_tracer_class.new(provider, "x")
+      def interrupting.on_request_start(**)
+        raise LLM::Interrupt, "stop"
+      end
+      multi = described_class.new(interrupting, tracer_b)
+
+      expect {
+        multi.on_request_start(operation: "chat", request_id:)
+      }.to raise_error(LLM::Interrupt)
+    end
+  end
+
+  describe "#on_exit" do
+    it "fans out to every tracer" do
+      expect(multi.on_exit).to be_nil
+      expect(tracer_a.calls.map(&:first)).to include(:on_exit)
+      expect(tracer_b.calls.map(&:first)).to include(:on_exit)
+    end
+  end
+
+  describe "#start_trace / #stop_trace" do
+    it "fans out and returns self" do
+      expect(multi.start_trace(name: "turn")).to be(multi)
+      expect(multi.stop_trace).to be(multi)
+    end
+  end
+
+  describe "#set_finish_metadata_proc / #merge_extra / #flush!" do
+    it "fans out and returns self (or nil for flush!)" do
+      proc = ->(res) { {intent: "chat"} }
+      expect(multi.set_finish_metadata_proc(proc)).to be(multi)
+      expect(multi.merge_extra(metadata: {a: 1})).to be(multi)
+      expect(multi.flush!).to be_nil
+    end
+  end
+
+  describe "#spans" do
+    it "aggregates the spans of every tracer" do
+      def tracer_a.spans = ["span-a"]
+      def tracer_b.spans = ["span-b"]
+      expect(multi.spans).to eq(["span-a", "span-b"])
+    end
+  end
+end
