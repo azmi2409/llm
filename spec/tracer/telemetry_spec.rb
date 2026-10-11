@@ -118,13 +118,17 @@ RSpec.describe LLM::Tracer::Telemetry do
       expect(tracer.spans.last.name).to eq("execute_tool tool")
     end
 
-    it "does not record an error" do
-      expect(tracer.spans.last.attributes).not_to have_key("error.type")
-      expect(tracer.spans.last.status.ok?).to be(true)
+    it "records error.type" do
+      expect(tracer.spans.last.attributes["error.type"]).to eq("LLM::Interrupt")
     end
 
-    it "adds an interrupt event of its own" do
-      expect(tracer.spans.last.events.map(&:name)).to include("gen_ai.tool.interrupt")
+    it "sets an error status" do
+      expect(tracer.spans.last.status.ok?).to be(false)
+    end
+
+    it "adds the standard finish event" do
+      expect(tracer.spans.last.events.map(&:name)).to include("gen_ai.tool.finish")
+      expect(tracer.spans.last.events.map(&:name)).not_to include("gen_ai.tool.interrupt")
     end
   end
 

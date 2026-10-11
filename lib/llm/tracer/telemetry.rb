@@ -168,7 +168,10 @@ module LLM
     # @return (see LLM::Tracer#on_tool_interrupt)
     def on_tool_interrupt(ex:, span:)
       return nil unless span
-      span.add_event("gen_ai.tool.interrupt")
+      attributes = {"error.type" => "LLM::Interrupt"}.compact
+      attributes.each { span.set_attribute(_1, _2) }
+      span.status = ::OpenTelemetry::Trace::Status.error("tool interrupted")
+      span.add_event("gen_ai.tool.finish")
       span.tap(&:finish)
     end
 
