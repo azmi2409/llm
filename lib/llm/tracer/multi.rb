@@ -6,10 +6,11 @@ class LLM::Tracer
   # tracers, so a request can (for example) be logged to a file
   # and exported to OpenTelemetry at the same time.
   #
-  # Spans returned by {on_request_start} and {on_tool_start} are
-  # tracked per tracer, and each tracer is handed back the span
-  # it returned when the request or tool finishes, errors, or is
-  # interrupted.
+  # {on_request_start} and {on_tool_start} return an array with
+  # one span per tracer, in the same order as {#tracers}. Pass the
+  # array back as `span:` to the matching finish, error, or
+  # interrupt callback, and each tracer is handed back the span
+  # it returned.
   #
   # A tracer that raises does not take the others down with it:
   # the error is reported the same way
@@ -23,184 +24,121 @@ class LLM::Tracer
   #   )
   class Multi < self
     ##
-    # The spans one start callback produced, keyed by tracer.
-    # Passed back to {#on_request_finish}, {#on_request_error},
-    # {#on_tool_finish}, {#on_tool_interrupt}, {#on_tool_error},
-    # and {#on_interrupt} as the `span:` argument.
-    # @api private
-    class Spans
-      ##
-      # @param [Hash] spans
-      #  A map of tracer to the span it returned
-      def initialize(spans = {})
-        @spans = spans
-      end
-
-      ##
-      # @param [LLM::Tracer] tracer
-      # @return [Object, nil]
-      #  The span the tracer returned from the start callback,
-      #  or nil when it returned none
-      def for(tracer)
-        @spans[tracer]
-      end
-    end
-
-    ##
+    # Returns the tracer(s) under the supervision of Multi
     # @return [Array<LLM::Tracer>]
-    #  The tracers callbacks are fanned out to
     attr_reader :tracers
 
     ##
     # @param [Array<LLM::Tracer>] tracers
-    #  The tracers to fan out to
+    #  The tracers to fan out to. A Multi has no provider
+    #  of its own.
     def initialize(*tracers)
-      super(tracers.first&.llm)
+      super(nil)
       @tracers = tracers
     end
 
     ##
     # @param (see LLM::Tracer#on_request_start)
-    # @return [LLM::Tracer::Multi::Spans]
-    #  The spans each tracer returned, keyed by tracer
-    def on_request_start(operation:, model: nil, inputs: nil, request_id:)
-      Spans.new(
-        @tracers.to_h do |tracer|
-          [tracer, tracer.on_request_start(operation:, model:, inputs:, request_id:)]
-        end
-      )
+    # @return [Array]
+    #  One span per tracer, in the same order as {#tracers}
+    def on_request_start(operation:, request_id:, model: nil, inputs: nil)
+      @tracers.map { _1.on_request_start(operation:, request_id:, model:, inputs:) }
     end
 
     ##
     # @param (see LLM::Tracer#on_request_finish)
-    # @return [nil]
+    # @return [void]
     def on_request_finish(operation:, res:, model: nil, span: nil, outputs: nil, metadata: nil, request_id:)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_request_finish(
-          operation:, res:, model:, span: spans.for(tracer),
-          outputs:, metadata:, request_id:
-        )
+      span.each.with_index do |s, i|
+        @tracers[i].on_request_finish(operation:, res:, model:, span: s, outputs:, metadata:, request_id:)
       end
-      nil
     end
 
     ##
     # @param (see LLM::Tracer#on_request_error)
-    # @return [nil]
+    # @return [void]
     def on_request_error(ex:, span:, request_id:)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_request_error(ex:, span: spans.for(tracer), request_id:)
+      span.each.with_index do |s, i|
+        @tracers[i].on_request_error(ex:, span: s, request_id:)
       end
-      nil
     end
 
     ##
     # @param (see LLM::Tracer#on_tool_start)
-    # @return [LLM::Tracer::Multi::Spans]
-    #  The spans each tracer returned, keyed by tracer
+    # @return [Array]
+    #  One span per tracer, in the same order as {#tracers}
     def on_tool_start(id:, name:, arguments:, model:)
-      Spans.new(
-        @tracers.to_h do |tracer|
-          [tracer, tracer.on_tool_start(id:, name:, arguments:, model:)]
-        end
-      )
+      @tracers.map { _1.on_tool_start(id:, name:, arguments:, model:) }
     end
 
     ##
     # @param (see LLM::Tracer#on_tool_interrupt)
-    # @return [nil]
+    # @return [void]
     def on_tool_interrupt(ex:, span:)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_tool_interrupt(ex:, span: spans.for(tracer))
+      span.each.with_index do |s, i|
+        @tracers[i].on_tool_interrupt(ex:, span: s)
       end
-      nil
     end
 
     ##
     # @param (see LLM::Tracer#on_tool_finish)
-    # @return [nil]
+    # @return [void]
     def on_tool_finish(result:, span:)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_tool_finish(result:, span: spans.for(tracer))
+      span.each.with_index do |s, i|
+        @tracers[i].on_tool_finish(result:, span: s)
       end
-      nil
     end
 
     ##
     # @param (see LLM::Tracer#on_tool_error)
-    # @return [nil]
+    # @return [void]
     def on_tool_error(ex:, span:)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_tool_error(ex:, span: spans.for(tracer))
+      span.each.with_index do |s, i|
+        @tracers[i].on_tool_error(ex:, span: s)
       end
-      nil
     end
 
     ##
     # @param (see LLM::Tracer#on_interrupt)
-    # @return [nil]
+    # @return [void]
     def on_interrupt(scope:, span: nil, request_id: nil)
-      spans = unwrap(span)
-      each_tracer do |tracer|
-        tracer.on_interrupt(scope:, span: spans.for(tracer), request_id:)
+      spans = span || Array.new(@tracers.size)
+      spans.each.with_index do |s, i|
+        @tracers[i].on_interrupt(scope:, span: s, request_id:)
       end
-      nil
     end
 
     ##
-    # @return [nil]
+    # @return [void]
     def on_exit
-      each_tracer(&:on_exit)
-      nil
+      @tracers.each(&:on_exit)
     end
 
     ##
     # @param (see LLM::Tracer#start_trace)
-    # @return [self]
-    def start_trace(trace_group_id: nil, name: "llm", attributes: {}, metadata: nil)
-      each_tracer { |tracer| tracer.start_trace(trace_group_id:, name:, attributes:, metadata:) }
-      self
+    # @return [Array<LLM::Tracer>]
+    def start_trace(...)
+      @tracers.each { _1.start_trace(...) }
     end
 
     ##
-    # @return [self]
+    # @return [Array<LLM::Tracer>]
     def stop_trace
-      each_tracer(&:stop_trace)
-      self
+      @tracers.each(&:stop_trace)
     end
 
     ##
     # @param (see LLM::Tracer#set_finish_metadata_proc)
-    # @return [self]
-    def set_finish_metadata_proc(proc)
-      each_tracer { |tracer| tracer.set_finish_metadata_proc(proc) }
-      self
+    # @return [Array<LLM::Tracer>]
+    def set_finish_metadata_proc(...)
+      @tracers.each { _1.set_finish_metadata_proc(...) }
     end
 
     ##
     # @param (see LLM::Tracer#merge_extra)
-    # @return [self]
-    def merge_extra(metadata: nil, inputs: nil, outputs: nil)
-      each_tracer { |tracer| tracer.merge_extra(metadata:, inputs:, outputs:) }
-      self
-    end
-
-    private
-
-    ##
-    # @param [Object, nil] span
-    # @return [LLM::Tracer::Multi::Spans]
-    def unwrap(span)
-      span.is_a?(Spans) ? span : Spans.new
-    end
-
-    def each_tracer
-      @tracers.each { |tracer| yield tracer }
+    # @return [Array<LLM::Tracer>]
+    def merge_extra(...)
+      @tracers.each { _1.merge_extra(...) }
     end
   end
 end

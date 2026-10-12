@@ -62,6 +62,26 @@ RSpec.describe LLM::Tracer::Multi do
         @calls << [:on_exit, {}]
         nil
       end
+
+      def start_trace(**)
+        @calls << [:start_trace, {}]
+        self
+      end
+
+      def stop_trace
+        @calls << [:stop_trace, {}]
+        self
+      end
+
+      def set_finish_metadata_proc(proc)
+        @calls << [:set_finish_metadata_proc, {}]
+        self
+      end
+
+      def merge_extra(**)
+        @calls << [:merge_extra, {}]
+        self
+      end
     end
   end
 
@@ -74,15 +94,15 @@ RSpec.describe LLM::Tracer::Multi do
       expect(multi.tracers).to eq([tracer_a, tracer_b])
     end
 
-    it "borrows the provider from the first tracer" do
-      expect(multi.llm).to eq(provider)
+    it "has no provider of its own" do
+      expect(multi.llm).to be_nil
     end
 
     it "works with no tracers" do
       empty = described_class.new
       expect(empty.tracers).to eq([])
       expect {
-        empty.on_request_start(operation: "chat", request_id:)
+        expect(empty.on_request_start(operation: "chat", request_id:)).to eq([])
       }.not_to raise_error
     end
   end
@@ -90,11 +110,9 @@ RSpec.describe LLM::Tracer::Multi do
   describe "#on_request_start / #on_request_finish" do
     let(:res) { double("LLM::Response") }
 
-    it "fans out and hands each tracer back its own span" do
+    it "fans out and returns one span per tracer, in order" do
       spans = multi.on_request_start(operation: "chat", model: "gpt-4.1", request_id:)
-      expect(spans).to be_a(described_class::Spans)
-      expect(spans.for(tracer_a)).to eq("a:request")
-      expect(spans.for(tracer_b)).to eq("b:request")
+      expect(spans).to eq(["a:request", "b:request"])
 
       multi.on_request_finish(operation: "chat", model: "gpt-4.1", res:, span: spans, request_id:)
 
@@ -118,10 +136,9 @@ RSpec.describe LLM::Tracer::Multi do
   describe "#on_tool_start / #on_tool_finish" do
     let(:result) { LLM::Function::Return.new("call_1", "tool", {ok: true}) }
 
-    it "fans out and hands each tracer back its own span" do
+    it "fans out and returns one span per tracer, in order" do
       spans = multi.on_tool_start(id: "call_1", name: "tool", arguments: {q: 1}, model: "gpt-4.1")
-      expect(spans.for(tracer_a)).to eq("a:tool")
-      expect(spans.for(tracer_b)).to eq("b:tool")
+      expect(spans).to eq(["a:tool", "b:tool"])
 
       multi.on_tool_finish(result:, span: spans)
 
@@ -179,8 +196,8 @@ RSpec.describe LLM::Tracer::Multi do
       expect {
         spans = multi.on_request_start(operation: "chat", request_id:)
       }.not_to raise_error
-      expect(spans.for(crashing)).to be_nil
-      expect(spans.for(tracer_b)).to eq("b:request")
+      # The crashed tracer contributes nil, in its position
+      expect(spans).to eq([nil, "b:request"])
       expect(tracer_b.calls.map(&:first)).to include(:on_request_start)
     end
 
@@ -199,24 +216,28 @@ RSpec.describe LLM::Tracer::Multi do
 
   describe "#on_exit" do
     it "fans out to every tracer" do
-      expect(multi.on_exit).to be_nil
+      multi.on_exit
       expect(tracer_a.calls.map(&:first)).to include(:on_exit)
       expect(tracer_b.calls.map(&:first)).to include(:on_exit)
     end
   end
 
   describe "#start_trace / #stop_trace" do
-    it "fans out and returns self" do
-      expect(multi.start_trace(name: "turn")).to be(multi)
-      expect(multi.stop_trace).to be(multi)
+    it "fans out to every tracer" do
+      multi.start_trace(name: "turn")
+      multi.stop_trace
+      expect(tracer_a.calls.map(&:first)).to include(:start_trace, :stop_trace)
+      expect(tracer_b.calls.map(&:first)).to include(:start_trace, :stop_trace)
     end
   end
 
   describe "#set_finish_metadata_proc / #merge_extra" do
-    it "fans out and returns self" do
+    it "fans out to every tracer" do
       proc = ->(res) { {intent: "chat"} }
-      expect(multi.set_finish_metadata_proc(proc)).to be(multi)
-      expect(multi.merge_extra(metadata: {a: 1})).to be(multi)
+      multi.set_finish_metadata_proc(proc)
+      multi.merge_extra(metadata: {a: 1})
+      expect(tracer_a.calls.map(&:first)).to include(:set_finish_metadata_proc, :merge_extra)
+      expect(tracer_b.calls.map(&:first)).to include(:set_finish_metadata_proc, :merge_extra)
     end
   end
 end
